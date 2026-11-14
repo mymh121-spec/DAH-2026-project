@@ -1,0 +1,7 @@
+target
+runtime
+.venv
+.git
+**/__pycache__
+*.gguf
+

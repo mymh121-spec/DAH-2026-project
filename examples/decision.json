@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "threat": {
+    "primary_threat": "none", "threat_domain": "simulation", "severity": "LOW",
+    "confidence": 1.0, "detected_effects": [], "reason": "정상 상태 시험 입력"
+  },
+  "response": {
+    "situation_code": "NOMINAL", "priority": "LOW", "action_code": "CONTINUE",
+    "recommended_action": "현재 가상 임무를 유지합니다.",
+    "allowed_control_intent": ["CONTINUE"],
+    "restricted_actions": ["offensive_action_generation", "direct_actuator_fire_control"],
+    "reason": "모델 추론 없이 데이터 흐름을 검증하는 고정 예제"
+  }
+}

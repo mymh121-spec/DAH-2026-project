@@ -1,0 +1,6 @@
+{
+  "event_id": "example-001",
+  "timestamp_utc": "2026-11-14T00:00:00Z",
+  "observation": "가상 환경의 정상 상태 예제입니다. 통신과 센서에 보고된 이상이 없습니다.",
+  "llm_task": {"forbidden_output_fields": []}
+}
