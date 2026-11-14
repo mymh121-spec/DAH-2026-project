@@ -1,14 +1,16 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use serde_json::{json, Value};
+use std::collections::HashSet;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct SituationInput {
+    pub schema_version: u32,
     pub threat: Threat,
     pub response: Response,
 }
-
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Threat {
     pub primary_threat: String,
     pub threat_domain: String,
@@ -17,18 +19,18 @@ pub struct Threat {
     pub detected_effects: Vec<String>,
     pub reason: String,
 }
-
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Response {
     pub situation_code: String,
     pub priority: String,
+    pub action_code: String,
     pub recommended_action: String,
     pub allowed_control_intent: Vec<String>,
     pub restricted_actions: Vec<String>,
     pub reason: String,
 }
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum PlatformMode {
     UavLowValue,
     UavHighValue,
@@ -36,12 +38,56 @@ pub enum PlatformMode {
     UgvHalfTrack,
     UgvTracked,
 }
+impl std::str::FromStr for PlatformMode {
+    type Err = String;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "UavLowValue" => Ok(Self::UavLowValue),
+            "UavHighValue" => Ok(Self::UavHighValue),
+            "UgvWheeled" => Ok(Self::UgvWheeled),
+            "UgvHalfTrack" => Ok(Self::UgvHalfTrack),
+            "UgvTracked" => Ok(Self::UgvTracked),
+            _ => Err(format!("Unknown platform: {value}")),
+        }
+    }
+}
+impl PlatformMode {
+    pub fn group(self) -> &'static str {
+        match self {
+            Self::UavLowValue | Self::UavHighValue => "UAV",
+            _ => "UGV",
+        }
+    }
+}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FinalAction {
+    ContinueNominalOperation,
+    EvadeAndReturnToBase,
+    ReduceExposureAndReposition,
+    HoldForReview,
+}
+impl FinalAction {
+    fn intent(self) -> &'static str {
+        match self {
+            Self::ContinueNominalOperation => "CONTINUE",
+            Self::EvadeAndReturnToBase => "RETURN_TO_BASE",
+            Self::ReduceExposureAndReposition => "REPOSITION",
+            Self::HoldForReview => "HOLD",
+        }
+    }
+}
+#[derive(Debug, Serialize)]
+pub struct ControlCommand {
+    pub command: &'static str,
+    pub parameters: Value,
+}
 #[derive(Debug, Serialize)]
 pub struct ControlDecision {
-    pub final_action: String,
+    pub final_action: FinalAction,
     pub priority: String,
-    pub mission_policy: String,
+    pub mission_policy: &'static str,
     pub mobility_commands: Vec<ControlCommand>,
     pub actuator_commands: Vec<ControlCommand>,
     pub communication_commands: Vec<ControlCommand>,
@@ -49,318 +95,143 @@ pub struct ControlDecision {
     pub recovery_commands: Vec<ControlCommand>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ControlCommand {
-    pub command: String,
-    pub parameters: BTreeMap<String, ControlValue>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-pub enum ControlValue {
-    Text(String),
-    Bool(bool),
-    Number(f64),
-}
-
-#[derive(Debug)]
-struct PlatformPolicy {
-    priority: &'static str,
-    mission_policy: &'static str,
-}
-
-pub fn decide_action(
-    platform_mode: PlatformMode,
-    situation: &SituationInput,
-) -> ControlDecision {
-    let policy = platform_policy(platform_mode);
-    let high_threat = situation.threat.severity == "HIGH" || situation.threat.severity == "CRITICAL";
-    let comm_degraded = situation.threat.detected_effects.contains(&"communication_degradation".to_string());
-    let gnss_degraded = situation.threat.detected_effects.contains(&"position_information_loss".to_string());
-
-    let final_action = match platform_mode {
-        PlatformMode::UavHighValue if high_threat => "evade_and_return_to_base",
-        PlatformMode::UgvWheeled | PlatformMode::UgvHalfTrack | PlatformMode::UgvTracked
-            if high_threat =>
-        {
-            "reduce_exposure_and_reposition"
+/// Enum values come from the same checked-in schema used by Python.
+/// Serde enforces required fields, exact types and unknown-field rejection.
+pub fn validate_situation(s: &SituationInput) -> Result<(), String> {
+    let schema: Value = serde_json::from_str(include_str!("../schemas/decision.schema.json"))
+        .map_err(|e| e.to_string())?;
+    if s.schema_version != 1 {
+        return Err("Unsupported schema_version".into());
+    }
+    for text in [
+        &s.threat.primary_threat,
+        &s.threat.threat_domain,
+        &s.threat.reason,
+        &s.response.situation_code,
+        &s.response.recommended_action,
+        &s.response.reason,
+    ] {
+        if text.trim().is_empty() {
+            return Err("Text fields must not be blank".into());
         }
-        _ => "continue_nominal_operation",
-    };
-
-    let mut communication_commands = vec![command(
-        "set_link_policy",
-        [
-            ("requested_by_llm", text(&situation.response.situation_code)),
-            ("status", text(if comm_degraded { "degraded" } else { "normal" })),
-            (
-                "anti_spoofing_checks",
-                boolean(situation.threat.detected_effects.contains(&"command_integrity_risk".to_string())),
-            ),
-        ],
-    )];
-
-    if comm_degraded {
-        communication_commands.push(command(
-            "switch_to_backup_or_low_bandwidth_link",
-            [("reason", text("communication_degraded"))],
-        ));
     }
-
-    let mut sensor_commands = vec![command(
-        "set_sensor_policy",
-        [
-            ("requested_by_llm", text(&situation.response.situation_code)),
-            ("sensor_integrity_risk", boolean(situation.threat.detected_effects.contains(&"sensor_integrity_risk".to_string()))),
-        ],
-    )];
-
-    if situation.threat.detected_effects.contains(&"optical_sensor_degradation".to_string()) {
-        sensor_commands.push(command(
-            "enable_radar_only_mode",
-            [("reason", text("optical_sensor_degraded"))],
-        ));
+    if !s.threat.confidence.is_finite() || !(0.0..=1.0).contains(&s.threat.confidence) {
+        return Err("confidence must be finite and between 0 and 1".into());
     }
-
-    let mut recovery_commands = vec![];
-    if situation.threat.detected_effects.contains(&"physical_damage_risk".to_string()) {
-        recovery_commands.push(command(
-            "initiate_damage_assessment",
-            [("priority", text("immediate"))],
-        ));
+    let tp = &schema["properties"]["threat"]["properties"];
+    let rp = &schema["properties"]["response"]["properties"];
+    for (value, spec) in [
+        (&s.threat.severity, &tp["severity"]),
+        (&s.response.priority, &rp["priority"]),
+        (&s.response.action_code, &rp["action_code"]),
+    ] {
+        if !spec["enum"].as_array().unwrap().contains(&json!(value)) {
+            return Err(format!("Unknown enum value: {value}"));
+        }
     }
-
-    let mut final_mobility_cmds = mobility_commands(platform_mode, situation);
-    if gnss_degraded {
-        final_mobility_cmds.push(command(
-            "enable_inertial_navigation_fallback",
-            [("gnss_trust_level", text("low"))],
-        ));
-    }
-
-    ControlDecision {
-        final_action: final_action.to_string(),
-        priority: policy.priority.to_string(),
-        mission_policy: format!(
-            "{}; llm_mission={}; llm_survival={}",
-            policy.mission_policy, situation.response.recommended_action, situation.response.priority
+    for (values, spec) in [
+        (&s.threat.detected_effects, &tp["detected_effects"]),
+        (
+            &s.response.allowed_control_intent,
+            &rp["allowed_control_intent"],
         ),
-        mobility_commands: final_mobility_cmds,
-        actuator_commands: actuator_commands(platform_mode, situation),
-        communication_commands,
-        sensor_commands,
-        recovery_commands,
+        (&s.response.restricted_actions, &rp["restricted_actions"]),
+    ] {
+        let allowed = spec["items"]["enum"].as_array().unwrap();
+        let mut seen = HashSet::new();
+        for value in values {
+            if !seen.insert(value) || !allowed.contains(&json!(value)) {
+                return Err(format!("Duplicate or unknown array value: {value}"));
+            }
+        }
     }
-}
-
-fn platform_policy(platform_mode: PlatformMode) -> PlatformPolicy {
-    match platform_mode {
-        PlatformMode::UavLowValue => PlatformPolicy {
-            priority: "mission_continuation",
-            mission_policy: "Low-value UAV prioritizes mission continuation under acceptable risk.",
-        },
-        PlatformMode::UavHighValue => PlatformPolicy {
-            priority: "asset_survival",
-            mission_policy: "High-value UAV prioritizes return-to-base or safe-area exit.",
-        },
-        PlatformMode::UgvWheeled => PlatformPolicy {
-            priority: "controlled_reposition",
-            mission_policy: "Wheeled UGV controls steering angle and target speed.",
-        },
-        PlatformMode::UgvHalfTrack => PlatformPolicy {
-            priority: "stable_reposition",
-            mission_policy: "Half-track UGV controls steering angle plus left/right track speeds.",
-        },
-        PlatformMode::UgvTracked => PlatformPolicy {
-            priority: "differential_track_control",
-            mission_policy:
-                "Tracked UGV controls movement through left/right track speed difference.",
-        },
+    if s.response.restricted_actions.len() != 2 {
+        return Err("Both restricted_actions are required".into());
     }
+    Ok(())
 }
 
-fn mobility_commands(
-    platform_mode: PlatformMode,
-    situation: &SituationInput,
-) -> Vec<ControlCommand> {
-    let evasive = situation.response.recommended_action.contains("evasive");
-    let fpv_drone = situation.threat.primary_threat.contains("FPV") || situation.threat.primary_threat.contains("드론");
-    let speed_scale = if fpv_drone { 0.45 } else { 0.70 };
-    let turn_bias = if evasive { 18.0 } else { 6.0 };
+pub fn parse_situation(text: &str) -> Result<SituationInput, String> {
+    // Deserialize directly to structs to reject duplicate fields, not through Value.
+    let s: SituationInput = serde_json::from_str(text).map_err(|e| e.to_string())?;
+    validate_situation(&s)?;
+    Ok(s)
+}
 
-    match platform_mode {
-        PlatformMode::UavLowValue => vec![command(
-            "uav_continue_route_with_randomized_lateral_offset",
-            [
-                (
-                    "lateral_offset_limit_m",
-                    number(if evasive { 25.0 } else { 5.0 }),
-                ),
-                ("altitude_change_rate_mps", number(if fpv_drone { 4.0 } else { 1.5 })),
-            ],
-        )],
-        PlatformMode::UavHighValue => vec![command(
-            "uav_execute_return_to_base_or_safe_area",
-            [
-                ("climb_to_safe_altitude_m", number(150.0)),
-                ("evasive_zigzag_enabled", boolean(evasive)),
-                ("max_speed_percent", number(if fpv_drone { 100.0 } else { 80.0 })),
-            ],
-        )],
-        PlatformMode::UgvWheeled => vec![command(
-            "ugv_wheeled_reposition",
-            [
-                ("steering_angle_deg", number(turn_bias)),
-                ("target_speed_mps", number(2.5 * speed_scale)),
-                ("avoid_open_areas", boolean(evasive)),
-            ],
-        )],
-        PlatformMode::UgvHalfTrack => vec![command(
-            "ugv_halftrack_reposition",
-            [
-                ("steering_angle_deg", number(turn_bias)),
-                ("target_speed_mps", number(2.0 * speed_scale)),
-                ("avoid_open_areas", boolean(evasive)),
-            ],
-        )],
-        PlatformMode::UgvTracked => vec![command(
-            "ugv_tracked_reposition",
-            [
-                ("track_speed_difference_mps", number(if evasive { 0.8 } else { 0.2 })),
-                ("target_speed_mps", number(1.5 * speed_scale)),
-                ("avoid_open_areas", boolean(evasive)),
-            ],
-        )],
+/// Pure simulation policy. 0.5 is a demonstration threshold, not a calibrated score.
+pub fn decide_action(
+    platform: PlatformMode,
+    s: &SituationInput,
+) -> Result<ControlDecision, String> {
+    validate_situation(s)?;
+    let high = matches!(s.threat.severity.as_str(), "HIGH" | "CRITICAL");
+    let untrusted = s.response.situation_code == "SAFE_FALLBACK" || s.threat.confidence < 0.5;
+    let mut action = if untrusted || s.response.action_code == "HOLD" {
+        FinalAction::HoldForReview
+    } else if high {
+        match platform {
+            PlatformMode::UavHighValue => FinalAction::EvadeAndReturnToBase,
+            PlatformMode::UavLowValue => FinalAction::ContinueNominalOperation,
+            _ => FinalAction::ReduceExposureAndReposition,
+        }
+    } else {
+        match s.response.action_code.as_str() {
+            "CONTINUE" => FinalAction::ContinueNominalOperation,
+            "RETURN_TO_BASE" if platform.group() == "UAV" => FinalAction::EvadeAndReturnToBase,
+            "REPOSITION" if platform.group() == "UGV" => FinalAction::ReduceExposureAndReposition,
+            _ => FinalAction::HoldForReview,
+        }
+    };
+    if action != FinalAction::HoldForReview
+        && !s
+            .response
+            .allowed_control_intent
+            .iter()
+            .any(|v| v == action.intent())
+    {
+        action = FinalAction::HoldForReview;
     }
+    // All command groups derive from this one resolved action.
+    // No independently guessed motor PWM, speed, altitude or physical control loop.
+    let parameters = json!({
+        "action": action,
+        "control_backend": "virtual_simulator",
+        "hardware_io_enabled": false,
+        "virtual_control_enabled": action != FinalAction::HoldForReview,
+    });
+    Ok(ControlDecision {
+        final_action: action,
+        priority: s.response.priority.clone(),
+        mission_policy: if action == FinalAction::HoldForReview {
+            "simulation_execution_paused_pending_review"
+        } else {
+            "validated_abstract_simulation_intent"
+        },
+        mobility_commands: vec![ControlCommand {
+            command: "set_virtual_action",
+            parameters: parameters.clone(),
+        }],
+        actuator_commands: vec![ControlCommand {
+            command: "apply_virtual_action",
+            parameters,
+        }],
+        communication_commands: vec![],
+        sensor_commands: vec![],
+        recovery_commands: vec![],
+    })
 }
 
-fn actuator_commands(
-    platform_mode: PlatformMode,
-    situation: &SituationInput,
-) -> Vec<ControlCommand> {
-    let evasive = situation.response.recommended_action.contains("evasive");
-    let fpv_drone = situation.threat.primary_threat.contains("FPV") || situation.threat.primary_threat.contains("드론");
-    let speed_scale = if fpv_drone { 0.45 } else { 0.70 };
-    let turn_bias = if evasive { 18.0 } else { 6.0 };
-
-    match platform_mode {
-        PlatformMode::UavLowValue => vec![command(
-            "abstract_uav_motor_and_attitude_setpoint",
-            [
-                ("hardware_io_enabled", boolean(false)),
-                ("control_backend", text("virtual_simulator")),
-                ("virtual_control_enabled", boolean(true)),
-                ("virtual_update_rate_hz", number(50.0)),
-                ("virtual_command_frame", text("body_frame")),
-                ("motor_output_mode", text("normalized_throttle")),
-                ("front_left_motor_throttle", number(0.62)),
-                ("front_right_motor_throttle", number(0.58)),
-                ("rear_left_motor_throttle", number(0.60)),
-                ("rear_right_motor_throttle", number(0.60)),
-                ("virtual_altitude_hold_m", number(80.0)),
-                ("virtual_forward_speed_mps", number(if fpv_drone { 18.0 } else { 22.0 })),
-                ("roll_setpoint_deg", number(if evasive { -8.0 } else { 0.0 })),
-                ("pitch_setpoint_deg", number(if fpv_drone { 4.0 } else { 1.0 })),
-                ("yaw_rate_setpoint_deg_s", number(if evasive { 12.0 } else { 3.0 })),
-            ],
-        )],
-        PlatformMode::UavHighValue => vec![command(
-            "abstract_uav_safe_exit_motor_and_attitude_setpoint",
-            [
-                ("hardware_io_enabled", boolean(false)),
-                ("control_backend", text("virtual_simulator")),
-                ("virtual_control_enabled", boolean(true)),
-                ("virtual_update_rate_hz", number(50.0)),
-                ("virtual_command_frame", text("body_frame")),
-                ("motor_output_mode", text("normalized_throttle")),
-                ("front_left_motor_throttle", number(0.55)),
-                ("front_right_motor_throttle", number(0.55)),
-                ("rear_left_motor_throttle", number(0.55)),
-                ("rear_right_motor_throttle", number(0.55)),
-                ("virtual_altitude_hold_m", number(120.0)),
-                ("virtual_forward_speed_mps", number(16.0)),
-                ("roll_setpoint_deg", number(0.0)),
-                ("pitch_setpoint_deg", number(3.0)),
-                ("yaw_rate_setpoint_deg_s", number(6.0)),
-            ],
-        )],
-        PlatformMode::UgvWheeled => vec![command(
-            "abstract_wheeled_motor_and_steering_setpoint",
-            [
-                ("hardware_io_enabled", boolean(false)),
-                ("control_backend", text("virtual_simulator")),
-                ("virtual_control_enabled", boolean(true)),
-                ("virtual_update_rate_hz", number(20.0)),
-                ("virtual_command_frame", text("vehicle_base_link")),
-                ("steering_servo_angle_deg", number(turn_bias)),
-                ("virtual_steering_servo_pwm_us", number(1500.0 + turn_bias * 10.0)),
-                ("left_drive_motor_speed_mps", number(2.5 * speed_scale)),
-                ("right_drive_motor_speed_mps", number(2.5 * speed_scale)),
-                ("virtual_left_drive_motor_rpm", number(320.0 * speed_scale)),
-                ("virtual_right_drive_motor_rpm", number(320.0 * speed_scale)),
-                ("brake_percent", number(if fpv_drone { 10.0 } else { 0.0 })),
-            ],
-        )],
-        PlatformMode::UgvHalfTrack => vec![command(
-            "abstract_half_track_motor_and_steering_setpoint",
-            [
-                ("hardware_io_enabled", boolean(false)),
-                ("control_backend", text("virtual_simulator")),
-                ("virtual_control_enabled", boolean(true)),
-                ("virtual_update_rate_hz", number(20.0)),
-                ("virtual_command_frame", text("vehicle_base_link")),
-                ("steering_servo_angle_deg", number(turn_bias * 0.75)),
-                (
-                    "virtual_steering_servo_pwm_us",
-                    number(1500.0 + turn_bias * 7.5),
-                ),
-                ("left_track_motor_speed_mps", number(1.8 * speed_scale)),
-                ("right_track_motor_speed_mps", number(1.2 * speed_scale)),
-                ("track_speed_difference_mps", number(0.6 * speed_scale)),
-                ("virtual_left_track_motor_rpm", number(280.0 * speed_scale)),
-                ("virtual_right_track_motor_rpm", number(190.0 * speed_scale)),
-                ("brake_percent", number(if fpv_drone { 12.0 } else { 0.0 })),
-            ],
-        )],
-        PlatformMode::UgvTracked => vec![command(
-            "abstract_tracked_differential_motor_setpoint",
-            [
-                ("hardware_io_enabled", boolean(false)),
-                ("control_backend", text("virtual_simulator")),
-                ("virtual_control_enabled", boolean(true)),
-                ("virtual_update_rate_hz", number(20.0)),
-                ("virtual_command_frame", text("vehicle_base_link")),
-                ("left_track_motor_speed_mps", number(1.6 * speed_scale)),
-                ("right_track_motor_speed_mps", number(0.9 * speed_scale)),
-                ("track_speed_difference_mps", number(0.7 * speed_scale)),
-                ("virtual_left_track_motor_rpm", number(260.0 * speed_scale)),
-                ("virtual_right_track_motor_rpm", number(145.0 * speed_scale)),
-                ("virtual_yaw_rate_deg_s", number(turn_bias * 0.8)),
-                ("turning_by_speed_difference", boolean(true)),
-                ("brake_percent", number(if fpv_drone { 12.0 } else { 0.0 })),
-            ],
-        )],
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn public_api_rejects_invalid_input() {
+        let mut s = parse_situation(include_str!("../examples/decision.json")).unwrap();
+        s.threat.confidence = f64::NAN;
+        assert!(decide_action(PlatformMode::UgvTracked, &s).is_err());
     }
-}
-
-fn command<const N: usize>(name: &str, params: [(&str, ControlValue); N]) -> ControlCommand {
-    ControlCommand {
-        command: name.to_string(),
-        parameters: params
-            .into_iter()
-            .map(|(key, value)| (key.to_string(), value))
-            .collect(),
+    #[test]
+    fn platform_requires_exact_name() {
+        assert!("UgvTrakced".parse::<PlatformMode>().is_err());
     }
-}
-
-fn text(value: &str) -> ControlValue {
-    ControlValue::Text(value.to_string())
-}
-
-fn boolean(value: bool) -> ControlValue {
-    ControlValue::Bool(value)
-}
-
-fn number(value: f64) -> ControlValue {
-    ControlValue::Number((value * 1000.0).round() / 1000.0)
 }
