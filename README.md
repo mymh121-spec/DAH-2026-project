@@ -1,264 +1,141 @@
 # Rust JSON LLM Decision Module
 
-UAV/UGV 방어 시나리오를 입력으로 받아 공격 이벤트를 선택하고, LLM이 생성한 방어 판단을 Rust 정책 엔진이 플랫폼별 제어 명령으로 변환하는 시뮬레이션 모듈입니다.
+Python에서 생성하거나 예제로 제공한 판단 JSON을 검증하고 Rust가 플랫폼별 **가상 행동 명령**으로 변환하는 시뮬레이션 모듈입니다. 하드웨어 연결, 물리 엔진, 실시간 제어 루프는 구현하지 않습니다.
 
-> [!WARNING]
-> 이 프로젝트는 방어 로직과 가상 제어 명령을 검증하기 위한 시뮬레이션입니다. 실제 UAV/UGV 하드웨어에 명령을 보내지 않으며, 생성되는 actuator 명령에도 `hardware_io_enabled: false`가 포함됩니다.
+## 빠른 실행 — 모델 없이 전체 흐름 확인
 
-## 현재 동작 요약
+Python 3.10 이상과 최신 stable Rust/Cargo가 필요합니다.
 
-- 전체 파이프라인의 정식 진입점은 `launcher.py`입니다.
-- Python은 공격 시나리오 선택과 LLM 추론을 담당하고, Rust는 최종 플랫폼 정책과 제어 명령 생성을 담당합니다.
-- 모듈 간 JSON 교환 디렉터리는 `runtime/`입니다.
-- LLM 결과가 JSON 스키마를 만족하지 못하면 안전 기본값(fallback)을 사용합니다. 다만 `llama-cpp-python` 미설치, 모델 다운로드 실패, 추론 예외 자체를 자동 복구하는 mock 모드는 현재 구현되어 있지 않습니다.
-- `dashboard/server.py`와 `Dockerfile`은 현재 `runtime/`·`rust/` 구조로 완전히 이관되지 않은 레거시 파일입니다. 아래의 소스 실행 경로를 기준으로 사용하십시오.
-
-## 처리 흐름
-
-```text
-attack/attack_base.json
-        + attack/llm_input_attack_observation.json
-        │
-        ▼
-attack/run_attack.py
-        ├─ runtime/selected_attack.json
-        └─ runtime/llm_input_merged.json
-                         │
-                         ▼
-                   llm/run_llm.py
-                   └─ runtime/decision.json
-                                      │
-                                      ▼
-                         rust/src/main.rs
-                         └─ runtime/rust_output.json
-```
-
-1. `attack/run_attack.py`가 공격 데이터베이스에서 시나리오 하나를 선택합니다.
-2. 선택한 공격과 관측 데이터를 합쳐 LLM 입력 JSON을 만듭니다.
-3. `llm/run_llm.py`가 Gemma를 호출하고 `threat`와 `response`를 포함한 JSON을 생성·검증합니다.
-4. Rust가 `runtime/decision.json`을 검증한 뒤 플랫폼 모드에 맞는 최종 결정을 출력하고 결과를 저장합니다.
-
-## 디렉터리 구조
-
-```text
-rust_decision_module/
-├─ launcher.py                         # 전체 파이프라인 실행
-├─ attack/
-│  ├─ attack_base.json                  # 공격 시나리오 데이터베이스
-│  ├─ llm_input_attack_observation.json # 관측 입력 샘플
-│  └─ run_attack.py                     # 공격 선택 및 입력 병합
-├─ llm/
-│  ├─ run_llm.py                        # Gemma 추론 및 JSON 검증
-│  └─ llm_prompt.txt                    # 참고용 프롬프트 파일
-├─ rust/
-│  ├─ Cargo.toml
-│  └─ src/
-│     ├─ lib.rs                         # 플랫폼 정책 및 명령 생성
-│     └─ main.rs                        # JSON 입출력과 Rust 실행 진입점
-├─ runtime/                             # 실행 중 생성되는 JSON과 LLM 캐시
-├─ run_rust_gui.py                      # Windows Tkinter GUI 실행기
-├─ view_result.py                       # 마지막 결과를 보는 보조 GUI
-├─ dashboard/                           # 레거시 웹 대시보드
-└─ Dockerfile                           # 레거시 Docker 정의
-```
-
-## 요구 사항
-
-- Windows, Linux 또는 macOS
-- Python 3.10 이상
-- Rust toolchain 및 Cargo (Dockerfile 기준 Rust 1.78)
-- LLM 추론용 `llama-cpp-python>=0.2.90`
-- Gemma GGUF 모델을 처음 내려받을 수 있는 네트워크와 충분한 메모리
-
-설치:
-
-```powershell
-py -3.10 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
+~~~sh
 python -m pip install -r requirements.txt
-```
+python launcher.py --platform UgvTracked --mode fixture
+~~~
 
-현재 `llm/run_llm.py`는 로컬 `llm/gemma.gguf` 파일을 직접 열지 않고 `llama_cpp.Llama.from_pretrained()`로 다음 모델을 요청합니다.
+fixture 모드는 examples/observation.json과 examples/decision.json을 읽고 Rust를 빌드·실행합니다. LLM 다운로드나 추론은 하지 않습니다. fixture는 고정된 검증용 판단이며 관측으로부터 추론한 결과가 아닙니다.
 
-```text
-repo_id: google/gemma-4-E2B-it-qat-q4_0-gguf
-filename: gemma-4-E2B_q4_0-it.gguf
-```
+실행기는 어느 작업 디렉터리에서 호출해도 기본 예제와 Cargo 프로젝트를 자신의 위치에서 찾습니다. 사용자가 넘기는 상대 경로는 명령을 실행한 디렉터리 기준입니다.
 
-따라서 첫 실행에는 모델 다운로드가 발생할 수 있습니다. 모델 로드가 실패하면 전체 파이프라인도 실패합니다.
+## 실제 파일 구성
 
-## 빠른 실행: 전체 파이프라인
+| 경로 | 역할 |
+| --- | --- |
+| launcher.py | 입력 복사, fixture/LLM 실행, Rust 호출, 실행 상태 기록 |
+| LLM_run/run_llm.py | 프롬프트, 스키마 검증, 캐시, 모델 호출 |
+| schemas/decision.schema.json | Python 검증 및 Rust enum 목록의 공통 계약 |
+| examples/observation.json | 관측 입력 예제 |
+| examples/decision.json | 모델 없는 시험에 사용하는 판단 예제 |
+| src/lib.rs | 검증과 순수 시뮬레이션 정책, 가상 명령 생성 |
+| src/main.rs | 명시적 플랫폼·입출력 경로를 받는 CLI |
+| tests/test_regressions.py | 언어 간 계약과 전체 파이프라인 회귀 시험 |
+| runtime/ | 실행 결과와 캐시. Git 추적 제외 |
 
-프로젝트 루트에서 실행합니다.
+이전 README에 기재된 attack/, llm/, rust/, GUI 실행기는 이 저장소에 없습니다. 복원한 실행기는 현재 코드 구조와 공개 예제로 동작하며, 누락된 과거 공격 데이터베이스나 GUI를 복원했다고 가정하지 않습니다.
 
-```powershell
-python launcher.py --platform UgvTracked
-```
+## 입력과 스키마
 
-사용 가능한 플랫폼 모드:
+기존 형식에는 schema_version: 1 및 response.action_code를 추가해야 합니다. 문자열 설명에서 행동을 추측하지 않습니다.
 
-| 모드 | 그룹 | HIGH/CRITICAL 위협 시 기본 최종 행동 |
-| --- | --- | --- |
-| `UavLowValue` | UAV 저가 자산 | 정상 임무 계속 정책 |
-| `UavHighValue` | UAV 고가 자산 | `evade_and_return_to_base` |
-| `UgvWheeled` | UGV 차륜형 | `reduce_exposure_and_reposition` |
-| `UgvHalfTrack` | UGV 반궤도형 | `reduce_exposure_and_reposition` |
-| `UgvTracked` | UGV 궤도형 | `reduce_exposure_and_reposition` |
+- action_code와 allowed_control_intent: CONTINUE, HOLD, RETURN_TO_BASE, REPOSITION
+- severity와 priority: LOW, MEDIUM, HIGH, CRITICAL
+- confidence: 유한한 JSON 숫자 0~1. 문자열과 bool은 거절합니다.
+- 문자열 필드는 공백만으로 구성할 수 없습니다.
+- 배열은 중복을 허용하지 않으며 항목은 스키마 enum에 있어야 합니다.
+- restricted_actions에는 offensive_action_generation과 direct_actuator_fire_control 두 항목이 모두 필요합니다.
+- 추가 필드, 필드 누락, 중복 JSON 키와 잘못된 자료형은 거절합니다.
+- detected_effects의 허용 값은 스키마에 있습니다. 현재는 기록·검증만 하며 별도 통신·센서 명령을 실행하지 않습니다.
 
-`launcher.py`는 실행 전에 `runtime/*.json`을 삭제합니다. LLM 캐시인 `runtime/llm_cache/`는 유지됩니다.
+Python은 JSON Schema로 검증합니다. Rust는 엄격한 Serde 자료형과 동일 스키마의 enum 목록을 사용하고 숫자 범위·빈 문자열·필수 제한을 확인합니다. 회귀 시험이 두 구현의 입력 승인·거절 결과를 비교합니다. 스키마 변경 시 양쪽 검증과 시험을 함께 변경해야 합니다.
 
-## 모듈별 실행
+## 최종 행동과 가상 명령
 
-문제 원인을 분리하거나 고정된 공격 시나리오를 재현하려면 다음 순서로 실행합니다.
+| 조건 | 결과 |
+| --- | --- |
+| SAFE_FALLBACK, confidence < 0.5, 명시적 HOLD | hold_for_review |
+| HIGH/CRITICAL, UavHighValue | evade_and_return_to_base 후보 |
+| HIGH/CRITICAL, UgvWheeled/UgvHalfTrack/UgvTracked | reduce_exposure_and_reposition 후보 |
+| HIGH/CRITICAL, UavLowValue | continue_nominal_operation 후보 |
+| 그 외 | action_code를 플랫폼과 대조 |
 
-```powershell
-python attack/run_attack.py --platform UgvTracked --seed 42
-python llm/run_llm.py
-cargo run --manifest-path rust/Cargo.toml -- UgvTracked
-```
+후보 행동이 allowed_control_intent에 없거나 플랫폼과 맞지 않으면 hold_for_review로 전환합니다. 0.5는 데모 정책을 위한 임계치이며 신뢰도 보정이나 실제 운용 적합성을 검증한 값이 아닙니다.
 
-`--seed`는 `run_attack.py`에서만 지원합니다. `launcher.py`는 현재 seed 인자를 전달하지 않으므로 전체 실행에서는 공격이 무작위로 선택됩니다.
+최종 행동 하나에서 mobility_commands와 actuator_commands를 생성합니다. 두 그룹의 action이 같으며 hardware_io_enabled는 항상 false입니다. hold_for_review는 virtual_control_enabled도 false로 설정합니다. 기존의 서로 모순되는 고정 PWM·속도·고도·주파수 값은 제거했습니다. 실제 제어기를 구현하려면 별도 상태 입력, 운동 모델과 피드백 설계가 필요합니다.
 
-Rust만 실행할 수도 있지만, 이 경우 먼저 `runtime/decision.json`이 있어야 합니다.
+communication_commands, sensor_commands, recovery_commands는 호환되는 출력 영역으로 남겨 두되 현재 빈 배열입니다.
 
-```powershell
-cargo run --manifest-path rust/Cargo.toml -- UgvTracked
-```
+## 결과 확인과 실패 처리
 
-`rust/` 디렉터리에서 실행할 때는 다음과 같이 쓸 수 있습니다.
+runtime/latest.json에서 가장 최근에 시작한 유효한 실행의 상태를 확인합니다.
 
-```powershell
-Set-Location rust
-cargo run -- UgvTracked
-```
+- running: 진행 중, result_path는 null
+- success: 검증된 가상 행동 출력
+- held: 실행 보류 판단. 출력은 있지만 성공 행동과 구분
+- failed: 입력, 모델, 빌드, 실행 또는 시간 제한 오류. result_path는 null
 
-## GUI 실행
+각 실행은 고유 run_id를 가지며 runtime/runs/<run_id>/ 아래에 observation.json, decision.json, rust_output.json, status.json을 기록합니다. 실패한 단계 이후의 파일은 없을 수 있습니다. 과거 결과는 기록으로 보존하며 현재 성공 결과로 재사용하지 않습니다. 이전 버전의 runtime/decision.json, runtime/rust_output.json은 실행기가 읽지 않습니다.
 
-Windows에서 Tkinter GUI를 사용하려면 다음을 실행합니다.
+JSON은 같은 디렉터리의 임시 파일에 쓴 뒤 교체합니다. 동일 runtime 디렉터리의 동시 실행은 .run.lock으로 거절합니다. 강제 종료 후 잠금이 남았다면 실제 실행 프로세스가 종료됐는지 확인하고 해당 잠금 파일만 지우세요. 강제 종료된 실행의 상태는 running으로 남을 수 있습니다.
 
-```powershell
-python run_rust_gui.py
-```
+~~~sh
+python launcher.py --platform UavHighValue --mode fixture --timeout 60
+python launcher.py --platform UgvTracked --input examples/observation.json --decision examples/decision.json --runtime-dir runtime/custom
+~~~
 
-GUI는 공격 선택 → LLM 추론 → Rust 실행을 순서대로 수행합니다. `dist/`에 패키징된 실행 파일이 있으면 이를 우선 사용하고, 없으면 Python 스크립트와 Cargo를 사용합니다.
+플랫폼 이름은 필수이며 오타는 오류입니다. 무작위 플랫폼 선택은 없습니다. timeout은 각 외부 단계의 제한 시간(초)이며 전체 실행 시간을 뜻하지 않습니다. 명령행 인자 검증 실패나 기존 잠금 충돌은 새 실행을 시작하지 않습니다.
 
-마지막 결과만 확인하려면 다음 보조 GUI를 사용할 수 있습니다.
+## 실제 LLM 사용 — 선택 사항
 
-```powershell
-python view_result.py
-```
+~~~sh
+python -m pip install -r requirements-llm.txt
+python launcher.py --platform UgvTracked --mode llm --timeout 600
+~~~
 
-## 입력 및 출력 JSON
+llama-cpp-python의 GPU 지원은 설치 빌드와 장치 환경에 따라 달라집니다. 모델을 처음 사용할 때는 다운로드, 접근 권한 및 충분한 메모리가 필요할 수 있습니다.
 
-### LLM 입력
+| 환경 변수 | 기본값 / 역할 |
+| --- | --- |
+| LLM_MODEL_PATH | 지정하면 로컬 GGUF를 사용 |
+| LLM_MODEL_REPO | google/gemma-4-E2B-it-qat-q4_0-gguf |
+| LLM_MODEL_FILE | gemma-4-E2B_q4_0-it.gguf |
+| LLM_MODEL_REVISION | 원격 revision. 캐시 사용에는 40자리 커밋 SHA 필요 |
+| LLM_N_CTX | 4096 |
+| LLM_N_THREADS | CPU 스레드 수의 절반, 최소 1 |
+| LLM_N_GPU_LAYERS | -1 |
+| LLM_MAX_TOKENS | 1024 |
 
-`runtime/llm_input_merged.json`은 `attack/llm_input_attack_observation.json`에 선택된 공격 정보와 플랫폼 컨텍스트를 추가한 파일입니다.
+위 모델 식별자는 기존 코드의 기본값을 유지한 것이며 모델의 가용성과 실제 추론 품질은 별도 확인해야 합니다. 원하는 호환 GGUF를 LLM_MODEL_PATH로 지정할 수 있습니다.
 
-### LLM 결정 JSON
+모델 출력 JSON이 잘렸거나 스키마를 위반하면 SAFE_FALLBACK으로 바꾸며 상태는 held가 됩니다. 모델 다운로드·로딩·추론 자체의 실행 오류는 failed로 기록하고 종료 코드 1을 반환합니다.
 
-`runtime/decision.json`의 최상위 구조는 다음과 같아야 합니다.
+캐시는 전체 입력, 실제 프롬프트, 프롬프트 버전, 스키마, 모델 식별·설정으로 구분합니다. 로컬 모델은 파일 SHA-256을 계산하므로 대용량 파일에서는 준비 시간이 필요합니다. 원격 모델은 고정 커밋 SHA를 지정한 경우만 캐시하며 main 같은 이동하는 revision은 캐시하지 않습니다. 캐시도 다시 검증하고 손상·부적합 항목은 재생성합니다. fallback은 캐시하지 않습니다.
 
-```json
-{
-  "threat": {
-    "primary_threat": "string",
-    "threat_domain": "string",
-    "severity": "LOW|MEDIUM|HIGH|CRITICAL",
-    "confidence": 0.0,
-    "detected_effects": ["string"],
-    "reason": "string"
-  },
-  "response": {
-    "situation_code": "string",
-    "priority": "string",
-    "recommended_action": "string",
-    "allowed_control_intent": ["string"],
-    "restricted_actions": [
-      "offensive_action_generation",
-      "direct_actuator_fire_control"
-    ],
-    "reason": "string"
-  }
-}
-```
+## Rust 단독 실행
 
-Rust는 다음을 추가로 확인합니다.
+~~~sh
+cargo build --locked
+cargo run --locked -- --platform UgvTracked --input examples/decision.json --output runtime/manual/rust_output.json
+~~~
 
-- `threat.primary_threat`와 `threat.threat_domain`이 비어 있지 않아야 합니다.
-- `severity`는 `LOW`, `MEDIUM`, `HIGH`, `CRITICAL` 중 하나여야 합니다.
-- `confidence`는 `0.0`부터 `1.0` 사이여야 합니다.
-- `response.situation_code`와 `recommended_action`이 비어 있지 않아야 합니다.
-- `restricted_actions`에 `offensive_action_generation`과 `direct_actuator_fire_control`이 모두 있어야 합니다.
+--platform, --input, --output은 모두 필수입니다. 직접 실행 시 같은 출력 파일을 여러 프로세스가 공유하지 마세요. 지정한 기존 출력은 처리 전에 제거하므로 검증 실패 뒤 오래된 결과가 남지 않습니다. 입력과 출력이 같은 파일이면 원본 보호를 위해 거절합니다.
 
-### Rust 출력 JSON
+## 테스트
 
-`runtime/rust_output.json`에는 플랫폼 정보와 다음 결정 영역이 포함됩니다.
+~~~sh
+cargo fmt --check
+cargo test --locked
+cargo build --locked
+python -m unittest discover -s tests -v
+~~~
 
-- `final_action`, `priority`, `mission_policy`
-- `mobility_commands`
-- `actuator_commands`
-- `communication_commands`
-- `sensor_commands`
-- `recovery_commands`
+시험 범위: 자료형·필드·enum 계약, 5개 플랫폼, fallback, 신뢰도 경계, 최종 행동과 하위 명령 일치, 설명 문장 독립성, 플랫폼 오타, 캐시 손상·버전 변경, 입력·출력 동일 경로, 실패 후 이전 결과, 실행 잠금, 시간 제한, 다른 작업 디렉터리에서의 실행.
 
-모든 actuator 명령은 현재 `virtual_simulator`용 추상 setpoint입니다. 실제 모터·조향·무장·통신 장치와 연결하는 코드는 포함되어 있지 않습니다.
+GitHub Actions는 Windows/Linux 및 Python 3.10/3.12에서 회귀 시험을 수행하고 Linux에서 Docker 빌드와 fixture 실행을 확인합니다. CI와 기본 테스트는 실제 LLM을 호출하지 않습니다.
 
-## 환경 변수
+## Docker — fixture 실행
 
-LLM 실행 시 다음 환경 변수를 조정할 수 있습니다.
+~~~sh
+docker build -t dah-simulation .
+docker run --rm dah-simulation
+~~~
 
-| 변수 | 기본값 | 용도 |
-| --- | --- | --- |
-| `LLM_N_CTX` | `4096` | LLM context 길이 |
-| `LLM_N_THREADS` | CPU 코어 수의 절반 이상 | CPU 추론 스레드 수 |
-| `LLM_MAX_TOKENS` | `512` | 최대 생성 토큰 수 |
-| `LLM_N_GPU_LAYERS` | `-1` | GPU offload 레이어 수 |
+기본 이미지는 모델 없는 실행용이며 실제 존재하는 소스·스키마·예제만 복사합니다. LLM 의존성과 모델은 포함하지 않습니다. 실제 모델 시험에는 소스 실행 경로를 사용하세요.
 
-Windows에서 Cargo 빌드 잠금 문제가 있으면 다음을 설정할 수 있습니다.
-
-```powershell
-$env:CARGO_INCREMENTAL = "0"
-```
-
-## 결과 파일 정리
-
-| 파일 | 생성 주체 | 설명 |
-| --- | --- | --- |
-| `runtime/selected_attack.json` | `attack/run_attack.py` | 무작위 또는 seed 기반 선택 결과 |
-| `runtime/llm_input_merged.json` | `attack/run_attack.py` | LLM에 전달할 병합 입력 |
-| `runtime/decision.json` | `llm/run_llm.py` | 검증된 LLM 판단 |
-| `runtime/rust_output.json` | Rust 실행 파일 | 플랫폼별 최종 결정 및 명령 |
-| `runtime/llm_cache/*.json` | `llm/run_llm.py` | 입력별 LLM 결과 캐시 |
-
-## 문제 해결
-
-### `llama_cpp is not installed`
-
-가상환경이 활성화되어 있는지 확인한 뒤 다음을 실행합니다.
-
-```powershell
-python -m pip install -r requirements.txt
-```
-
-### 모델 다운로드 또는 로드 실패
-
-첫 실행에는 Hugging Face 모델 다운로드가 필요할 수 있습니다. 네트워크, 디스크 여유 공간, 메모리와 `llama-cpp-python` 설치 상태를 확인하십시오. 현재 코드에는 이 오류를 mock 결과로 자동 전환하는 처리가 없습니다.
-
-### `LLM decision file not found`
-
-Rust만 실행했거나 LLM 단계가 실패한 경우 발생합니다. 전체 파이프라인을 다시 실행하거나, 먼저 `python llm/run_llm.py`를 실행해 `runtime/decision.json`을 생성하십시오.
-
-### Rust 빌드 잠금 또는 Windows 빌드 오류
-
-프로젝트 루트에서 `CARGO_INCREMENTAL=0`을 설정한 뒤 다시 실행하십시오. 또한 `cargo check --manifest-path rust/Cargo.toml`로 Rust 단계만 먼저 확인할 수 있습니다.
-
-## 레거시 파일 안내
-
-- `attack/select_way.py`는 `launcher.py`를 호출하는 호환용 래퍼입니다. 새 실행에는 `launcher.py`를 사용하십시오.
-- `dashboard/server.py`는 현재 `output/`, `select/` 경로와 루트의 `Cargo.toml`을 참조하므로, 현재의 `runtime/`·`rust/` 구조에서는 별도 수정 없이 정상 동작한다고 보장할 수 없습니다.
-- `Dockerfile`도 `ai_agent/`, `select/`, `output/`를 복사하도록 작성된 이전 구조 기준입니다. Docker 배포가 필요하면 `rust/`, `attack/`, `llm/`, `runtime/` 구조에 맞게 먼저 갱신해야 합니다.
-
-## 라이선스 및 운영 범위
-
-이 디렉터리는 방어 시나리오의 데이터 흐름, JSON 스키마 검증, 플랫폼별 가상 제어 정책을 시험하기 위한 코드입니다. 실제 장비 운용 전에는 별도의 안전성 검증, 권한 통제, 하드웨어 인터페이스 검증이 필요합니다.

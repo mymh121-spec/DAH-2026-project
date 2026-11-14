@@ -1,0 +1,6 @@
+/target/
+/runtime/
+/.venv/
+__pycache__/
+*.pyc
+*.gguf
